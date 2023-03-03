@@ -1,11 +1,11 @@
 import os
 from functools import wraps
-from werkzeug import secure_filename
+from werkzeug.utils import secure_filename
 from flask import request, Blueprint, render_template, jsonify, flash, \
-    redirect, url_for as flask_url_for, g, abort
-from my_app import db, app, ALLOWED_EXTENSIONS, babel
+    redirect, url_for as flask_url_for, g, abort, current_app
+from my_app import db, ALLOWED_EXTENSIONS, babel
 from my_app.catalog.models import Product, Category, ProductForm, CategoryForm
-from sqlalchemy.orm.util import join
+from sqlalchemy.orm import join
 from flask_babel import lazy_gettext as _
 import geoip2.database
 from geoip2.errors import AddressNotFoundError
@@ -14,14 +14,14 @@ import boto3
 catalog = Blueprint('catalog', __name__)
 
 
-@app.before_request
+@catalog.before_request
 def before():
     if request.view_args and 'lang' in request.view_args:
         g.current_lang = request.view_args['lang']
         request.view_args.pop('lang')
 
 
-@app.context_processor
+@catalog.context_processor
 def inject_url_for():
     return {
         'url_for': lambda endpoint, **kwargs: flask_url_for(
@@ -31,11 +31,6 @@ def inject_url_for():
 
 
 url_for = inject_url_for()['url_for']
-
-
-@babel.localeselector
-def get_locale():
-    return g.get('current_lang', 'en')
 
 
 def template_or_json(template=None):
@@ -48,7 +43,7 @@ def template_or_json(template=None):
         @wraps(f)
         def decorated_fn(*args, **kwargs):
             ctx = f(*args, **kwargs)
-            if request.is_xhr or not template:
+            if request.headers.get("X-Requested-With") == "XMLHttpRequest" or not template:
                 return jsonify(ctx)
             else:
                 return render_template(template, **ctx)
@@ -61,9 +56,9 @@ def allowed_file(filename):
             filename.lower().rsplit('.', 1)[1] in ALLOWED_EXTENSIONS
 
 
-@app.errorhandler(404)
+@catalog.errorhandler(404)
 def page_not_found(e):
-    app.logger.error(e)
+    current_app.logger.error(e)
     return render_template('404.html'), 404
 
 
@@ -73,7 +68,7 @@ def page_not_found(e):
 @template_or_json('home.html')
 def home():
     products = Product.query.all()
-    app.logger.info(
+    current_app.logger.info(
         'Home page with total of %d products' % len(products)
     )
     return {'count': len(products)}
@@ -83,7 +78,7 @@ def home():
 def product(id):
     product = Product.query.filter_by(id=id).first()
     if not product:
-        app.logger.warning('Requested product not found.')
+        current_app.logger.warning('Requested product not found.')
         abort(404)
     return render_template('product.html', product=product)
 
@@ -91,7 +86,7 @@ def product(id):
 @catalog.route('/<lang>/products')
 @catalog.route('/<lang>/products/<int:page>')
 def products(page=1):
-    products = Product.query.paginate(page, 10)
+    products = Product.query.paginate(page=page, per_page=10)
     return render_template('products.html', products=products)
 
 
@@ -110,14 +105,14 @@ def create_product():
         if image and allowed_file(image.filename):
             filename = secure_filename(image.filename)
             session = boto3.Session(
-                aws_access_key_id=app.config['AWS_ACCESS_KEY'],
-                aws_secret_access_key=app.config['AWS_SECRET_KEY']
+                aws_access_key_id=current_app.config['AWS_ACCESS_KEY'],
+                aws_secret_access_key=current_app.config['AWS_SECRET_KEY']
             )
             s3 = session.resource('s3')
-            bucket = s3.Bucket(app.config['AWS_BUCKET'])
+            bucket = s3.Bucket(current_app.config['AWS_BUCKET'])
             if bucket not in list(s3.buckets.all()):
                 bucket = s3.create_bucket(
-                    Bucket=app.config['AWS_BUCKET'],
+                    Bucket=current_app.config['AWS_BUCKET'],
                     CreateBucketConfiguration={
                         'LocationConstraint': 'ap-south-1'
                     },
@@ -125,10 +120,10 @@ def create_product():
             bucket.upload_fileobj(
                 image, filename,
                 ExtraArgs={'ACL': 'public-read'})
-        reader = geoip2.database.Reader('GeoLite2-City_20190416/GeoLite2-City.mmdb')
+        reader = geoip2.database.Reader('GeoLite2-City_20230113/GeoLite2-City.mmdb')
         try:
             match = reader.city(request.remote_addr)
-        except AddressNotFoundError:
+        except geoip2.errors.AddressNotFoundError:
             match = None
 
         product = Product(
@@ -168,7 +163,7 @@ def product_search(page=1):
             Category.name.like('%' + category + '%')
         )
     return render_template(
-        'products.html', products=products.paginate(page, 10)
+        'products.html', products=products.paginate(page=page, per_page=10)
     )
 
 
